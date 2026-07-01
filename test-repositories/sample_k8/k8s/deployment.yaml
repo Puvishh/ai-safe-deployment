@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: sample-k8s-app
+
+spec:
+  replicas: 3
+
+  selector:
+    matchLabels:
+      app: sample-k8s-app
+
+  template:
+    metadata:
+      labels:
+        app: sample-k8s-app
+
+    spec:
+      containers:
+        - name: sample-k8s-app
+
+          image: sample-k8s-app:v1
+
+          ports:
+            - containerPort: 5000
+
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+
+            initialDelaySeconds: 5
+            periodSeconds: 5
