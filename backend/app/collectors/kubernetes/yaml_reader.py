@@ -1,61 +1,37 @@
 import logging
+from typing import Any
+
 import yaml
-from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-class YamlReader:
+
+class KubernetesYAMLReader:
     """
-    A utility class to read and parse Kubernetes YAML files.
-    Responsible solely for loading YAML strings or files into Python dictionaries
-    and handling potential parsing errors safely.
+    Reads Kubernetes YAML manifests.
     """
 
-    @staticmethod
-    def read_from_file(file_path: str) -> Optional[Dict[str, Any]]:
+    def read_yaml(self, file_path: str) -> Any:
         """
-        Reads a YAML file from the given file path and parses it.
+        Read a Kubernetes YAML file.
 
-        Args:
-            file_path (str): The absolute or relative path to the YAML file.
-
-        Returns:
-            Optional[Dict[str, Any]]: The parsed YAML as a dictionary, or None if an error occurs.
+        Supports single-document and multi-document YAML.
         """
-        try:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                return YamlReader.read_from_string(file.read())
-        except FileNotFoundError:
-            logger.error(f"File not found: {file_path}")
-            return None
-        except IOError as e:
-            logger.error(f"IO Error reading file {file_path}: {str(e)}")
-            return None
-
-    @staticmethod
-    def read_from_string(yaml_content: str) -> Optional[Dict[str, Any]]:
-        """
-        Parses a YAML string into a Python dictionary.
-
-        Args:
-            yaml_content (str): The YAML content as a string.
-
-        Returns:
-            Optional[Dict[str, Any]]: The parsed YAML as a dictionary, or None if an error occurs.
-        """
-        if not yaml_content or not yaml_content.strip():
-            logger.warning("Empty YAML content provided.")
-            return None
 
         try:
-            # safe_load avoids arbitrary code execution vulnerabilities
-            parsed_data = yaml.safe_load(yaml_content)
-            
-            if not isinstance(parsed_data, dict):
-                logger.error("Parsed YAML is not a dictionary. Kubernetes manifests should be dictionaries.")
-                return None
-                
-            return parsed_data
+
+            with open(file_path, "r", encoding="utf-8") as file:
+
+                documents = list(yaml.safe_load_all(file))
+
+            return documents
+
+        except FileNotFoundError as e:
+
+            logger.error(f"YAML file not found: {file_path}")
+            raise e
+
         except yaml.YAMLError as e:
-            logger.error(f"Error parsing YAML content: {str(e)}")
-            return None
+
+            logger.error(f"Invalid YAML: {e}")
+            raise e

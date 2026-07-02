@@ -1,131 +1,143 @@
 import logging
-import importlib
-import pkgutil
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
-from .yaml_reader import YamlReader
-from . import detectors
+from .yaml_reader import KubernetesYAMLReader
+from .detectors.replica_detector import ReplicaDetector
+from .detectors.image_detector import ImageDetector
+from .detectors.memory_detector import MemoryDetector
+from .detectors.cpu_detector import CPUDetector
+from .detectors.probe_detector import ProbeDetector
+from .detectors.env_detector import EnvDetector
 
 logger = logging.getLogger(__name__)
 
+
 class KubernetesAnalyzer:
     """
-    Orchestrates the execution of all Kubernetes deployment detectors.
-    Loads YAML content, runs analysis rules, and aggregates risk metrics.
+    Analyze two Kubernetes Deployment YAML files and generate
+    deployment risk analysis.
     """
 
+    HIGH_SCORE = 30
+    MEDIUM_SCORE = 15
+    LOW_SCORE = 5
+
     def __init__(self):
-        """Initializes the analyzer by discovering and loading all available detectors."""
-        self.detectors = self._load_detectors()
+        self.yaml_reader = KubernetesYAMLReader()
 
-    def _load_detectors(self) -> List[Any]:
-        """
-        Dynamically discovers all detector classes within the 'detectors' package.
-        Assumes each module ending with '_detector' has a module-level 'detect' function
-        that instantiates the class and runs its logic.
-        """
-        loaded_detectors = []
-        try:
-            for _, module_name, _ in pkgutil.iter_modules(detectors.__path__):
-                if module_name.endswith("_detector"):
-                    module = importlib.import_module(f".detectors.{module_name}", package=__package__)
-                    if hasattr(module, 'detect') and callable(module.detect):
-                        loaded_detectors.append(module.detect)
-                    else:
-                        logger.warning(f"Module {module_name} lacks a callable 'detect' function.")
-        except Exception as e:
-            logger.error(f"Error loading detectors: {str(e)}")
-            
-        logger.info(f"Loaded {len(loaded_detectors)} detectors.")
-        return loaded_detectors
+        self.detectors = (
+            ReplicaDetector(),
+            ImageDetector(),
+            MemoryDetector(),
+            CPUDetector(),
+            ProbeDetector(),
+            EnvDetector(),
+        )
 
-    def _calculate_risk(self, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _calculate_risk(self, findings: List[Dict[str, Any]]) -> tuple[int, str]:
         """
-        Calculates the aggregate risk score and determining the overall risk level.
+        Calculate overall deployment risk.
         """
+
         score = 0
-        severity_weights = {
-            "HIGH": 3,
-            "MEDIUM": 2,
-            "LOW": 1,
-            "NONE": 0
-        }
 
         for finding in findings:
-            severity = finding.get("severity", "NONE")
-            score += severity_weights.get(severity, 0)
 
-        # Determine risk level based on the accumulated score
-        if score >= 10:
-            level = "CRITICAL"
-        elif score >= 5:
+            severity = finding.get("severity", "NONE").upper()
+
+            if severity == "HIGH":
+                score += self.HIGH_SCORE
+
+            elif severity == "MEDIUM":
+                score += self.MEDIUM_SCORE
+
+            elif severity == "LOW":
+                score += self.LOW_SCORE
+
+        if score > 50:
             level = "HIGH"
-        elif score >= 3:
+
+        elif score >= 21:
             level = "MEDIUM"
-        elif score >= 1:
+
+        else:
             level = "LOW"
-        else:
-            level = "NONE"
 
-        return {
-            "score": score,
-            "level": level
-        }
+        return score, level
 
-    def analyze(self, old_yaml_str: str, new_yaml_str: str, is_file_path: bool = False) -> Dict[str, Any]:
+    def analyze(
+        self,
+        old_yaml_path: str,
+        new_yaml_path: str
+    ) -> Dict[str, Any]:
         """
-        Loads the YAML configurations, executes all detectors, and builds the final risk report.
-
-        Args:
-            old_yaml_str: The string content or file path of the old YAML.
-            new_yaml_str: The string content or file path of the new YAML.
-            is_file_path: If True, treats the inputs as file paths instead of string content.
-
-        Returns:
-            Dict[str, Any]: A consolidated risk analysis report.
+        Run every Kubernetes detector and aggregate the results.
         """
-        # Load YAML using YamlReader
-        if is_file_path:
-            old_yaml = YamlReader.read_from_file(old_yaml_str) or {}
-            new_yaml = YamlReader.read_from_file(new_yaml_str) or {}
-        else:
-            old_yaml = YamlReader.read_from_string(old_yaml_str) or {}
-            new_yaml = YamlReader.read_from_string(new_yaml_str) or {}
 
-        findings = []
-        recommendations = []
+        logger.info("Starting Kubernetes deployment analysis...")
 
-        if not old_yaml and not new_yaml:
-            logger.warning("Both YAML configurations are empty or failed to parse.")
-            return {
-                "risk_score": 0,
-                "risk_level": "NONE",
-                "findings": [],
-                "recommendations": ["Ensure valid YAML configurations are provided."]
-            }
+        try:
 
-        # Execute all dynamically loaded detectors
-        for detect_func in self.detectors:
+            old_yaml = self.yaml_reader.read_yaml(old_yaml_path)
+            new_yaml = self.yaml_reader.read_yaml(new_yaml_path)
+
+        except Exception as e:
+            logger.exception(e)
+            raise ValueError(f"Unable to load YAML files: {e}")
+
+        if isinstance(old_yaml, list):
+            old_yaml = old_yaml[0]
+
+        if isinstance(new_yaml, list):
+            new_yaml = new_yaml[0]
+
+        findings: List[Dict[str, Any]] = []
+        recommendations: List[str] = []
+
+        for detector in self.detectors:
+
             try:
-                result = detect_func(old_yaml, new_yaml)
-                
-                # Only include results that actually triggered a change detection
-                if result and result.get("changed") is True:
-                    findings.append(result)
-                    
-                    rec = result.get("recommendation")
-                    if rec and rec not in recommendations:
-                        recommendations.append(rec)
-            except Exception as e:
-                detector_name = getattr(detect_func, '__module__', 'UnknownDetector')
-                logger.error(f"Detector {detector_name} failed: {str(e)}")
 
-        # Calculate final risk metrics based on findings
-        risk = self._calculate_risk(findings)
+                result = detector.detect(old_yaml, new_yaml)
+
+                if not isinstance(result, dict):
+                    continue
+
+                if result.get("changed", False):
+                    findings.append(result)
+
+                recommendation = result.get("recommendation")
+
+                if recommendation:
+
+                    if isinstance(recommendation, list):
+
+                        for rec in recommendation:
+                            if rec not in recommendations:
+                                recommendations.append(rec)
+
+                    else:
+
+                        if recommendation not in recommendations:
+                            recommendations.append(recommendation)
+
+            except Exception as e:
+
+                logger.exception(
+                    f"{detector.__class__.__name__} failed: {e}"
+                )
+
+        risk_score, risk_level = self._calculate_risk(findings)
+
+        logger.info(
+            f"Analysis completed. Risk Score={risk_score}, Level={risk_level}"
+        )
 
         return {
-            "risk_score": risk["score"],
-            "risk_level": risk["level"],
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "total_findings": len(findings),
+            "analyzed_detectors": len(self.detectors),
             "findings": findings,
-            "recommendations": recommendations
+            "recommendations": recommendations,
         }
