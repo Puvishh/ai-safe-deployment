@@ -1,7 +1,7 @@
 """
 Deployment Context Builder
 
-This module converts raw Git analysis into structured deployment context.
+Converts Git analysis into deployment context.
 """
 
 from app.schemes.git import GitAnalyzeResponse
@@ -13,11 +13,12 @@ class DeploymentContextBuilder:
     """
 
     def build(self, git_data: GitAnalyzeResponse) -> dict:
+
         deployment_files = []
+        docker_files = []
         config_files = []
         source_files = []
         documentation_files = []
-        docker_files = []
         other_files = []
 
         for file in git_data.changes:
@@ -43,7 +44,15 @@ class DeploymentContextBuilder:
         return {
             "repository": git_data.repository.name,
             "branch": git_data.repository.branch,
+
             "deployment_files": deployment_files,
+
+            # Temporary paths for MVP
+            "kubernetes": {
+                "old_yaml": "test-repositories/sample_k8/k8s/deployment_old.yaml",
+                "new_yaml": "test-repositories/sample_k8/k8s/deployment.yaml",
+            },
+
             "docker_files": docker_files,
             "config_files": config_files,
             "source_files": source_files,
