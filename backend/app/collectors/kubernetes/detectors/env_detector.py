@@ -1,105 +1,263 @@
-import logging
 import json
-from typing import Dict, Any, List
+import logging
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
+
 class EnvDetector:
     """
-    Analyzes Kubernetes YAML to detect changes in environment variables.
+    Detects changes in Kubernetes container environment variables.
     """
 
     def _extract_env_vars(self, yaml_data: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
-        env_configs = {}
+        """
+        Extract environment variables from all containers.
+
+        Returns:
+            {
+                "container-name": {
+                    "ENV_NAME": "value",
+                    ...
+                }
+            }
+        """
+
+        env_configs: Dict[str, Dict[str, str]] = {}
+
         try:
-            spec = yaml_data.get("spec", {})
-            template = spec.get("template", {})
-            template_spec = template.get("spec", {})
-            containers: List[Dict[str, Any]] = template_spec.get("containers", [])
+            containers: List[Dict[str, Any]] = (
+                yaml_data.get("spec", {})
+                .get("template", {})
+                .get("spec", {})
+                .get("containers", [])
+            )
 
             for container in containers:
-                name = container.get("name", "unknown")
-                envs = container.get("env", [])
-                
-                container_env = {}
-                for env_item in envs:
-                    if isinstance(env_item, dict) and "name" in env_item:
-                        env_name = env_item["name"]
-                        env_val = env_item.get("value")
-                        if env_val is None and "valueFrom" in env_item:
-                            env_val = json.dumps(env_item["valueFrom"], sort_keys=True)
-                        container_env[env_name] = str(env_val)
-                        
-                env_configs[name] = container_env
-        except AttributeError:
-            pass
-            
+                container_name = container.get("name", "unknown")
+
+                env_map: Dict[str, str] = {}
+
+                for env in container.get("env", []):
+
+                    if "name" not in env:
+                        continue
+
+                    env_name = env["name"]
+
+                    if "value" in env:
+                        env_value = str(env["value"])
+
+                    elif "valueFrom" in env:
+                        env_value = json.dumps(
+                            env["valueFrom"],
+                            sort_keys=True
+                        )
+
+                    else:
+                        env_value = ""
+
+                    env_map[env_name] = env_value
+
+                env_configs[container_name] = env_map
+
+        except Exception as e:
+            logger.error(f"Failed to extract environment variables: {e}")
+
         return env_configs
 
-    def detect(self, old_yaml: Dict[str, Any], new_yaml: Dict[str, Any]) -> Dict[str, Any]:
+    def detect(
+        self,
+        old_yaml: Dict[str, Any],
+        new_yaml: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """
-        Detects changes in environment variables across all containers.
-        Any change is flagged as MEDIUM severity.
+        Compare environment variables between two Kubernetes Deployment YAMLs.
         """
+
         try:
+
             old_envs = self._extract_env_vars(old_yaml)
             new_envs = self._extract_env_vars(new_yaml)
 
-            changes_detected = False
-            changes = []
-            old_vals = []
-            new_vals = []
+            findings = []
 
-            all_containers = set(old_envs.keys()).union(set(new_envs.keys()))
+            highest_severity = "NONE"
+
+            severity_rank = {
+                "NONE": 0,
+                "LOW": 1,
+                "MEDIUM": 2,
+                "HIGH": 3
+            }
+
+            all_containers = set(old_envs.keys()) | set(new_envs.keys())
 
             for container in all_containers:
-                old_container_env = old_envs.get(container, {})
-                new_container_env = new_envs.get(container, {})
-                
-                all_keys = set(old_container_env.keys()).union(set(new_container_env.keys()))
-                
-                for key in all_keys:
-                    old_val = old_container_env.get(key, "Not_Set")
-                    new_val = new_container_env.get(key, "Not_Set")
-                    
-                    if old_val != new_val:
-                        changes_detected = True
-                        changes.append(f"{container}.{key}")
-                        old_vals.append(f"{container}.{key}: {old_val}")
-                        new_vals.append(f"{container}.{key}: {new_val}")
 
-            if not changes_detected:
+                old_container = old_envs.get(container, {})
+                new_container = new_envs.get(container, {})
+
+                all_variables = set(old_container.keys()) | set(new_container.keys())
+
+                for variable in all_variables:
+
+                    old_value = old_container.get(variable)
+                    new_value = new_container.get(variable)
+
+                    if old_value == new_value:
+                        continue
+
+                    if old_value is None:
+
+                        severity = "LOW"
+
+                        reason = (
+                            f"Environment variable '{variable}' "
+                            f"added to container '{container}'."
+                        )
+
+                        recommendation = (
+                            "Verify the new environment variable is expected."
+                        )
+
+                    elif new_value is None:
+
+                        severity = "HIGH"
+
+                        reason = (
+                            f"Environment variable '{variable}' "
+                            f"removed from container '{container}'."
+                        )
+
+                        recommendation = (
+                            "Ensure removing this variable will not break the application."
+                        )
+
+                    elif "secretKeyRef" in str(old_value) or "secretKeyRef" in str(new_value):
+
+                        severity = "HIGH"
+
+                        reason = (
+                            f"Secret reference changed for '{variable}'."
+                        )
+
+                        recommendation = (
+                            "Review Secret changes carefully before deployment."
+                        )
+
+                    elif "configMapKeyRef" in str(old_value) or "configMapKeyRef" in str(new_value):
+
+                        severity = "MEDIUM"
+
+                        reason = (
+                            f"ConfigMap reference changed for '{variable}'."
+                        )
+
+                        recommendation = (
+                            "Verify ConfigMap changes are correct."
+                        )
+
+                    else:
+
+                        severity = "MEDIUM"
+
+                        reason = (
+                            f"Environment variable '{variable}' value changed."
+                        )
+
+                        recommendation = (
+                            "Verify the updated configuration value."
+                        )
+
+                    if severity_rank[severity] > severity_rank[highest_severity]:
+                        highest_severity = severity
+
+                    findings.append(
+                        {
+                            "container": container,
+                            "variable": variable,
+                            "old": old_value,
+                            "new": new_value,
+                            "severity": severity,
+                            "reason": reason,
+                            "recommendation": recommendation,
+                        }
+                    )
+
+            if not findings:
+
                 return {
-                    "field": "env",
-                    "old_value": " | ".join(old_vals) if old_vals else "None",
-                    "new_value": " | ".join(new_vals) if new_vals else "None",
+                    "field": "environment",
                     "changed": False,
                     "severity": "NONE",
-                    "reason": "No changes in environment variables.",
-                    "recommendation": ""
+                    "old_value": [],
+                    "new_value": [],
+                    "reason": "No environment variable changes detected.",
+                    "recommendation": "",
+                    "findings": []
                 }
 
+            recommendations = list(
+                {
+                    item["recommendation"]
+                    for item in findings
+                }
+            )
+
+            reasons = list(
+                {
+                    item["reason"]
+                    for item in findings
+                }
+            )
+
             return {
-                "field": "env",
-                "old_value": " | ".join(old_vals),
-                "new_value": " | ".join(new_vals),
+                "field": "environment",
                 "changed": True,
-                "severity": "MEDIUM",
-                "reason": f"Environment variables changed for: {', '.join(changes)}",
-                "recommendation": "Verify that new or updated environment variables do not expose sensitive data directly."
-            }
-            
-        except Exception as e:
-            logger.error(f"Error while detecting env changes: {str(e)}")
-            return {
-                "field": "env",
-                "old_value": None,
-                "new_value": None,
-                "changed": False,
-                "severity": "NONE",
-                "reason": "Error processing environment variables.",
-                "recommendation": ""
+                "severity": highest_severity,
+                "old_value": [
+                    {
+                        "container": item["container"],
+                        "variable": item["variable"],
+                        "value": item["old"],
+                    }
+                    for item in findings
+                ],
+                "new_value": [
+                    {
+                        "container": item["container"],
+                        "variable": item["variable"],
+                        "value": item["new"],
+                    }
+                    for item in findings
+                ],
+                "reason": reasons,
+                "recommendation": recommendations,
+                "findings": findings,
             }
 
-def detect(old_yaml: Dict[str, Any], new_yaml: Dict[str, Any]) -> Dict[str, Any]:
+        except Exception as e:
+
+            logger.exception(e)
+
+            return {
+                "field": "environment",
+                "changed": False,
+                "severity": "NONE",
+                "old_value": [],
+                "new_value": [],
+                "reason": "Failed to analyze environment variables.",
+                "recommendation": "Check detector logs.",
+                "findings": [],
+            }
+
+
+def detect(
+    old_yaml: Dict[str, Any],
+    new_yaml: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Module-level helper for dynamic loading.
+    """
     return EnvDetector().detect(old_yaml, new_yaml)
