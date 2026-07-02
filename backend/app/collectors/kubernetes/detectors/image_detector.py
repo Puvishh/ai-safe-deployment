@@ -10,7 +10,8 @@ class ImageDetector:
 
     def _extract_images(self, yaml_data: Dict[str, Any]) -> Dict[str, str]:
         """
-        Helper function to safely extract container names and their images.
+        Safely extracts container names and their corresponding image strings.
+        Returns a dictionary mapping container names to their images.
         """
         images = {}
         try:
@@ -20,9 +21,10 @@ class ImageDetector:
             containers: List[Dict[str, Any]] = template_spec.get("containers", [])
 
             for container in containers:
-                name = container.get("name", "unknown")
-                image = container.get("image")
-                if image:
+                if isinstance(container, dict):
+                    name = container.get("name", "unknown")
+                    # If image key is missing, default to empty string to represent 'Missing image'
+                    image = container.get("image", "")
                     images[name] = image
         except AttributeError:
             pass
@@ -34,44 +36,58 @@ class ImageDetector:
         Compares the old and new YAML configurations for changes in images.
         
         Rules:
-        - latest tag -> HIGH severity
-        - image version changed -> MEDIUM severity
-        - unchanged -> NONE severity
+        1. Image unchanged -> NONE
+        2. Image version changed -> MEDIUM
+        3. Image changed to latest -> HIGH
+        4. Missing image -> HIGH
         """
         try:
             old_images = self._extract_images(old_yaml)
             new_images = self._extract_images(new_yaml)
 
             changes_detected = False
-            has_latest = False
+            
+            # Use numeric values to track highest severity across multiple containers
+            severity_score = 0 
             
             old_vals = []
             new_vals = []
-            
-            # Check for changes in existing or newly added containers
+            reasons = []
+
+            # Check new containers for changes, latest tags, or missing images
             for container_name, new_img in new_images.items():
                 old_img = old_images.get(container_name)
                 
+                old_display = old_img if old_img else "None"
+                new_display = new_img if new_img else "Missing"
+                
                 if old_img != new_img:
                     changes_detected = True
-                    # In Docker/K8s, no tag implicitly means latest
-                    if new_img and (new_img.endswith(":latest") or ":" not in new_img.split("/")[-1]):
-                        has_latest = True
-                        
-                old_display = old_img if old_img else "None"
-                old_vals.append(f"{container_name}: {old_display}")
-                new_vals.append(f"{container_name}: {new_img}")
-                
+                    old_vals.append(f"{container_name}: {old_display}")
+                    new_vals.append(f"{container_name}: {new_display}")
+                    
+                    if not new_img:
+                        severity_score = max(severity_score, 2)
+                        reasons.append(f"Container '{container_name}' is missing an image definition.")
+                    elif new_img.endswith(":latest") or ":" not in new_img.split("/")[-1]:
+                        severity_score = max(severity_score, 2)
+                        reasons.append(f"Container '{container_name}' changed to use 'latest' tag.")
+                    else:
+                        severity_score = max(severity_score, 1)
+                        reasons.append(f"Container '{container_name}' image version changed.")
+
             # Check for removed containers
             for container_name, old_img in old_images.items():
                 if container_name not in new_images:
                     changes_detected = True
                     old_vals.append(f"{container_name}: {old_img}")
                     new_vals.append(f"{container_name}: Removed")
+                    severity_score = max(severity_score, 1)
+                    reasons.append(f"Container '{container_name}' was removed.")
 
             if not changes_detected:
                 return {
-                    "field": "image",
+                    "field": "spec.template.spec.containers.image",
                     "old_value": " | ".join(old_vals) if old_vals else "None",
                     "new_value": " | ".join(new_vals) if new_vals else "None",
                     "changed": False,
@@ -80,29 +96,28 @@ class ImageDetector:
                     "recommendation": ""
                 }
 
-            if has_latest:
-                severity = "HIGH"
-                reason = "Image updated to use 'latest' tag (or no tag). This introduces non-deterministic deployments."
-                recommendation = "Pin images to specific versions or SHA digests."
+            # Map score back to severity string
+            severity = "HIGH" if severity_score == 2 else "MEDIUM"
+            
+            if severity == "HIGH":
+                recommendation = "Ensure all containers have explicitly pinned image versions or SHAs."
             else:
-                severity = "MEDIUM"
-                reason = "Image version changed."
-                recommendation = "Ensure new image tags have been security scanned and approved for deployment."
+                recommendation = "Ensure new image tags have been security scanned and approved."
 
             return {
-                "field": "image",
+                "field": "spec.template.spec.containers.image",
                 "old_value": " | ".join(old_vals),
                 "new_value": " | ".join(new_vals),
                 "changed": True,
                 "severity": severity,
-                "reason": reason,
+                "reason": " ".join(reasons),
                 "recommendation": recommendation
             }
             
         except Exception as e:
             logger.error(f"Error while detecting image changes: {str(e)}")
             return {
-                "field": "image",
+                "field": "spec.template.spec.containers.image",
                 "old_value": None,
                 "new_value": None,
                 "changed": False,
